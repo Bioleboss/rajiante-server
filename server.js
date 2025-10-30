@@ -18,17 +18,21 @@ const rooms = new Map();
 io.on("connection", (socket) => {
   console.log("🛰️ Nouveau client connecté:", socket.id);
 
-  // Création de room
+  // === Création de room ===
   socket.on("createRoom", (_, cb) => {
     let code;
-    do { code = nano(); } while (rooms.has(code));
+    do {
+      code = nano();
+    } while (rooms.has(code));
+
     rooms.set(code, { hostId: socket.id, sockets: new Set([socket.id]) });
     socket.join(code);
+
     console.log(`🚀 Room créée: ${code}`);
     cb({ ok: true, code, isHost: true, playerIndex: 0 });
   });
 
-  // Rejoindre une room
+  // === Rejoindre une room ===
   socket.on("joinRoom", (code, cb) => {
     const room = rooms.get(code);
     if (!room) return cb({ ok: false, error: "Code invalide." });
@@ -36,36 +40,47 @@ io.on("connection", (socket) => {
 
     room.sockets.add(socket.id);
     socket.join(code);
+
     cb({ ok: true, code, isHost: false, playerIndex: 1 });
 
     io.to(room.hostId).emit("peerJoined");
     console.log(`👥 ${socket.id} a rejoint la room ${code}`);
   });
 
-  // Input du joueur → relayé vers le host
+  // === Input du joueur → relayé vers le host ===
   socket.on("clientInput", ({ code, input }) => {
     const room = rooms.get(code);
     if (!room) return;
     io.to(room.hostId).emit("clientInput", { id: socket.id, input });
   });
 
-  // Snapshot du host → relayé vers les autres
+  // === Snapshot du host → relayé vers les autres ===
   socket.on("hostSnapshot", ({ code, state }) => {
     const room = rooms.get(code);
     if (!room) return;
     socket.to(code).emit("hostSnapshot", state);
   });
 
-  // 💫 Pause synchronisée
+  // === Nouvelle requête : demande de snapshot initial ===
+  socket.on("requestSnapshot", ({ code }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+    // relayer la demande au host de cette room
+    io.to(room.hostId).emit("requestSnapshot", { code });
+    console.log(`📡 Requête de snapshot transmise au host de ${code}`);
+  });
+
+  // === Pause synchronisée ===
   socket.on("pauseState", ({ code, paused, player }) => {
     const room = rooms.get(code);
     if (!room) return;
     socket.to(code).emit("pauseState", { paused, player });
   });
 
-  // Déconnexion
+  // === Déconnexion ===
   socket.on("disconnect", () => {
     console.log("❌ Client déconnecté:", socket.id);
+
     for (const [code, room] of rooms.entries()) {
       if (room.sockets.has(socket.id)) {
         room.sockets.delete(socket.id);
