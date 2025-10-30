@@ -56,6 +56,13 @@ io.on("connection", (socket) => {
     socket.to(code).emit("hostSnapshot", state);
   });
 
+  // 💫 Pause synchronisée
+  socket.on("pauseState", ({ code, paused, player }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+    socket.to(code).emit("pauseState", { paused, player });
+  });
+
   // Déconnexion
   socket.on("disconnect", () => {
     console.log("❌ Client déconnecté:", socket.id);
