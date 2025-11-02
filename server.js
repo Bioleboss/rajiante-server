@@ -1,4 +1,4 @@
-// 🚀 Space Dual Server — v5 (volatile snapshots, no compression, room persist)
+// 🚀 Space Dual Server — v6 (stable, ping route + persistence)
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
@@ -11,40 +11,34 @@ const io = new Server(httpServer, {
   perMessageDeflate: false
 });
 
-const nano = customAlphabet("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", 5);
+// 🩵 route HTTP de test pour "réveiller" Render
+app.get("/", (_, res) => res.send("🛰️ Space Dual Server awake and running"));
 
-// room: { hostId, sockets:Set, lastState }
-const rooms = new Map();
+const nano = customAlphabet("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", 5);
+const rooms = new Map(); // code → { hostId, sockets:Set, lastState }
 
 io.on("connection", (socket) => {
   console.log("🛰️ connect:", socket.id);
 
   socket.on("createRoom", (_, cb) => {
-    let code; do { code = nano(); } while (rooms.has(code));
+    let code;
+    do { code = nano(); } while (rooms.has(code));
     rooms.set(code, { hostId: socket.id, sockets: new Set([socket.id]), lastState: null });
     socket.join(code);
     console.log("🚀 room created:", code);
-    cb({ ok: true, code, isHost: true, playerIndex: 0 });
+    cb?.({ ok: true, code, isHost: true, playerIndex: 0 });
   });
 
   socket.on("joinRoom", (code, cb) => {
     const room = rooms.get(code);
-    if (!room) return cb({ ok: false, error: "Code invalide ou session expirée." });
+    if (!room) return cb?.({ ok: false, error: "Code invalide ou session expirée." });
+    if (room.sockets.size >= 2) return cb?.({ ok: false, error: "Salle pleine." });
 
-    if (!room.hostId) { // host absent mais room gardée (reprise)
-      room.hostId = socket.id;
-      room.sockets.add(socket.id);
-      socket.join(code);
-      console.log("♻️ host resumed on", code);
-      return cb({ ok: true, code, isHost: true, playerIndex: 0, resumed: true });
-    }
-
-    if (room.sockets.size >= 2) return cb({ ok: false, error: "Salle pleine." });
     room.sockets.add(socket.id);
     socket.join(code);
-    cb({ ok: true, code, isHost: false, playerIndex: 1 });
+    cb?.({ ok: true, code, isHost: false, playerIndex: 1 });
     io.to(room.hostId).emit("peerJoined");
-    console.log("👥 join", socket.id, "room", code);
+    console.log("👥 join:", socket.id, "room:", code);
   });
 
   socket.on("clientInput", ({ code, input }) => {
@@ -57,8 +51,7 @@ io.on("connection", (socket) => {
     const room = rooms.get(code);
     if (!room) return;
     room.lastState = state;
-    // volatile: on drop si le client est saturé → moins de lag d'accumulation
-    socket.to(code).volatile.emit("hostSnapshot", state);
+    socket.to(code).volatile.emit("hostSnapshot", state); // envoi non bloquant
   });
 
   socket.on("pauseState", ({ code, paused, player }) => {
@@ -81,13 +74,13 @@ io.on("connection", (socket) => {
       socket.leave(code);
 
       if (room.hostId === socket.id) {
-        // on garde la room + dernier state pour permettre la reprise
+        // On garde la room pour permettre une reprise
         room.hostId = null;
         io.to(code).emit("peerLeft", { reason: "host_left" });
-        console.log(`⚠️ host left room ${code}, room persisted`);
+        console.log(`⚠️ host left ${code}, room persisted`);
       } else {
         if (room.hostId) io.to(room.hostId).emit("peerLeft", { reason: "peer_left" });
-        console.log(`👋 guest left room ${code}`);
+        console.log(`👋 guest left ${code}`);
       }
     }
   });
