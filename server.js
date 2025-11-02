@@ -1,96 +1,106 @@
-// 🚀 Space Dual Server — v6 (clean rooms + ping)
+// 🚀 Space Dual Server — v6.1 (WS fallback-safe + health routes)
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import { customAlphabet } from "nanoid";
 
 const app = express();
+
+// Petites routes de santé (aident Netlify/Render à vérifier que le service répond)
+app.get("/", (_req, res) => res.status(200).send("OK Space Dual"));
+app.get("/healthz", (_req, res) => res.status(200).json({ ok: true }));
+
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: "*" },
-  perMessageDeflate: false
+  perMessageDeflate: false, // évite des soucis proxys
+  // path: "/socket.io" // défaut; garde-le si tu veux expliciter
 });
 
 const nano = customAlphabet("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", 5);
 const rooms = new Map();
 
-// 🔄 nettoyage automatique des rooms vides/inactives
+// Nettoyage périodique des rooms inactives
 setInterval(() => {
   const now = Date.now();
   for (const [code, room] of rooms.entries()) {
-    if (!room.hostId && (!room.lastActive || now - room.lastActive > 5 * 60 * 1000)) {
+    const inactive = !room.hostId && (!room.lastActive || now - room.lastActive > 5 * 60 * 1000);
+    if (inactive || room.sockets.size === 0) {
       rooms.delete(code);
-      console.log(`🧹 Room ${code} supprimée (inactive)`);
+      console.log(`🧹 Room ${code} supprimée`);
     }
   }
-}, 60000);
+}, 60_000);
 
 io.on("connection", (socket) => {
   console.log("🛰️ Nouveau client:", socket.id);
 
-  const updateRoomActivity = (code) => {
+  const touch = (code) => {
     const r = rooms.get(code);
     if (r) r.lastActive = Date.now();
   };
 
   socket.on("pingTest", (_, cb) => cb && cb("pong"));
 
-  // 🏗️ Création de room
   socket.on("createRoom", (_, cb) => {
-    let code;
-    do { code = nano(); } while (rooms.has(code));
-    rooms.set(code, { hostId: socket.id, sockets: new Set([socket.id]), lastState: null, lastActive: Date.now() });
-    socket.join(code);
-    console.log(`🚀 Room créée: ${code}`);
-    cb({ ok: true, code, isHost: true, playerIndex: 0 });
+    try {
+      let code;
+      do { code = nano(); } while (rooms.has(code));
+      rooms.set(code, { hostId: socket.id, sockets: new Set([socket.id]), lastState: null, lastActive: Date.now() });
+      socket.join(code);
+      console.log(`🚀 Room créée: ${code}`);
+      cb?.({ ok: true, code, isHost: true, playerIndex: 0 });
+    } catch (e) {
+      console.error("createRoom error:", e);
+      cb?.({ ok: false, error: "Erreur serveur (createRoom)" });
+    }
   });
 
-  // 🔗 Rejoindre room
   socket.on("joinRoom", (code, cb) => {
-    const room = rooms.get(code);
-    if (!room) return cb({ ok: false, error: "Code invalide." });
-    if (room.sockets.size >= 2) return cb({ ok: false, error: "Salle pleine." });
+    try {
+      const room = rooms.get(code);
+      if (!room) return cb?.({ ok: false, error: "Code invalide." });
+      if (room.sockets.size >= 2) return cb?.({ ok: false, error: "Salle pleine." });
 
-    room.sockets.add(socket.id);
-    room.lastActive = Date.now();
-    socket.join(code);
-    cb({ ok: true, code, isHost: false, playerIndex: 1 });
-    io.to(room.hostId).emit("peerJoined");
-    console.log(`👥 ${socket.id} a rejoint ${code}`);
+      room.sockets.add(socket.id);
+      touch(code);
+      socket.join(code);
+      cb?.({ ok: true, code, isHost: false, playerIndex: 1 });
+      io.to(room.hostId).emit("peerJoined");
+      console.log(`👥 ${socket.id} a rejoint ${code}`);
+    } catch (e) {
+      console.error("joinRoom error:", e);
+      cb?.({ ok: false, error: "Erreur serveur (joinRoom)" });
+    }
   });
 
-  // 🎮 Inputs client → host
   socket.on("clientInput", ({ code, input }) => {
     const room = rooms.get(code);
     if (!room) return;
-    updateRoomActivity(code);
+    touch(code);
     io.to(room.hostId).emit("clientInput", { id: socket.id, input });
   });
 
-  // 📡 Snapshot host → client
   socket.on("hostSnapshot", ({ code, state }) => {
     const room = rooms.get(code);
     if (!room) return;
-    updateRoomActivity(code);
+    touch(code);
     room.lastState = state;
     socket.to(code).volatile.emit("hostSnapshot", state);
   });
 
-  // ⏸️ Pause sync
   socket.on("pauseState", ({ code, paused, player }) => {
     const room = rooms.get(code);
     if (!room) return;
-    updateRoomActivity(code);
+    touch(code);
     socket.to(code).emit("pauseState", { paused, player });
   });
 
-  // 🕹️ Requête d’état instantané (pour reprise)
   socket.on("requestSnapshot", ({ code }) => {
     const room = rooms.get(code);
     if (room?.lastState) socket.emit("hostSnapshot", room.lastState);
   });
 
-  // 🚪 Déconnexion
   socket.on("disconnect", () => {
     console.log("❌ Déco:", socket.id);
     for (const [code, room] of rooms.entries()) {
@@ -100,16 +110,16 @@ io.on("connection", (socket) => {
 
       if (room.hostId === socket.id) {
         io.to(code).emit("peerLeft", { reason: "host_left" });
-        room.hostId = null;
+        room.hostId = null; // laisse la room vivante quelques minutes
         console.log(`⚠️ Host a quitté ${code}`);
-      } else {
+      } else if (room.hostId) {
         io.to(room.hostId).emit("peerLeft", { reason: "peer_left" });
         console.log(`👋 Joueur a quitté ${code}`);
       }
 
       if (room.sockets.size === 0) {
         rooms.delete(code);
-        console.log(`🗑️ Room ${code} vidée et supprimée`);
+        console.log(`🗑️ Room ${code} supprimée (vide)`);
       }
     }
   });
