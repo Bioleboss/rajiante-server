@@ -1,4 +1,4 @@
-// 🚀 Space Dual Server — v4 (volatile snapshots + no compression)
+// 🚀 Space Dual Server — v5 (volatile snapshots, no compression, room persist)
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
@@ -30,13 +30,15 @@ io.on("connection", (socket) => {
   socket.on("joinRoom", (code, cb) => {
     const room = rooms.get(code);
     if (!room) return cb({ ok: false, error: "Code invalide ou session expirée." });
-    if (!room.hostId) { // host absent mais room gardée
+
+    if (!room.hostId) { // host absent mais room gardée (reprise)
       room.hostId = socket.id;
       room.sockets.add(socket.id);
       socket.join(code);
       console.log("♻️ host resumed on", code);
       return cb({ ok: true, code, isHost: true, playerIndex: 0, resumed: true });
     }
+
     if (room.sockets.size >= 2) return cb({ ok: false, error: "Salle pleine." });
     room.sockets.add(socket.id);
     socket.join(code);
@@ -55,6 +57,7 @@ io.on("connection", (socket) => {
     const room = rooms.get(code);
     if (!room) return;
     room.lastState = state;
+    // volatile: on drop si le client est saturé → moins de lag d'accumulation
     socket.to(code).volatile.emit("hostSnapshot", state);
   });
 
@@ -78,6 +81,7 @@ io.on("connection", (socket) => {
       socket.leave(code);
 
       if (room.hostId === socket.id) {
+        // on garde la room + dernier state pour permettre la reprise
         room.hostId = null;
         io.to(code).emit("peerLeft", { reason: "host_left" });
         console.log(`⚠️ host left room ${code}, room persisted`);
