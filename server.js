@@ -1,4 +1,4 @@
-// 🚀 Space Dual Server — v3 (room persist + snapshot + pause)
+// 🚀 Space Dual Server — v4 (volatile snapshots + no compression)
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
@@ -6,7 +6,10 @@ import { customAlphabet } from "nanoid";
 
 const app = express();
 const httpServer = createServer(app);
-const io = new Server(httpServer, { cors: { origin: "*" } });
+const io = new Server(httpServer, {
+  cors: { origin: "*" },
+  perMessageDeflate: false
+});
 
 const nano = customAlphabet("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", 5);
 
@@ -52,7 +55,7 @@ io.on("connection", (socket) => {
     const room = rooms.get(code);
     if (!room) return;
     room.lastState = state;
-    socket.to(code).emit("hostSnapshot", state);
+    socket.to(code).volatile.emit("hostSnapshot", state);
   });
 
   socket.on("pauseState", ({ code, paused, player }) => {
@@ -75,12 +78,10 @@ io.on("connection", (socket) => {
       socket.leave(code);
 
       if (room.hostId === socket.id) {
-        // garde la room + snapshot, notifie le client
         room.hostId = null;
         io.to(code).emit("peerLeft", { reason: "host_left" });
         console.log(`⚠️ host left room ${code}, room persisted`);
       } else {
-        // invité parti
         if (room.hostId) io.to(room.hostId).emit("peerLeft", { reason: "peer_left" });
         console.log(`👋 guest left room ${code}`);
       }
